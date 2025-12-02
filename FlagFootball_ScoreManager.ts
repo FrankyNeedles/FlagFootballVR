@@ -1,364 +1,221 @@
-import { Entity, Script, Vector3, Player, UI } from 'horizon';
+import { Component, PropTypes, Entity, TextGizmo, Vec3, World, Player } from 'horizon/core';
 
 /**
- * FlagFootball_ScoreManager.ts
- * Purpose: Manages game state, scoring, and game flow for 7v7 Flag Football.
+ * FlagFootball_ScoreManager
+ * Purpose: Manages game state, scoring, time, and down/distance logic.
  */
-export class FlagFootball_ScoreManager extends Script {
-    // Public Properties
-    public gameMode: string = "Standard";
-    public ManualSpotting: boolean = false;
-    public gameDurationMinutes: number = 20;
-    public quarterDurationMinutes: number = 5;
-    public yardsForFirstDown: number = 20;
-    public touchdownPoints: number = 6;
-    public extraPointPoints: number = 1;
-    public safetyPoints: number = 2;
-    public maxPlayersPerTeam: number = 7;
+class FlagFootball_ScoreManager extends Component<typeof FlagFootball_ScoreManager> {
+  static propsDefinition = {
+    // UI References - Drag your Text Gizmos here in the Editor
+    scoreboardText: { type: PropTypes.Entity }, 
+    downMarkerText: { type: PropTypes.Entity },
+    
+    // Game Settings
+    gameDurationMinutes: { type: PropTypes.Number, default: 20 },
+    yardsForFirstDown: { type: PropTypes.Number, default: 20 },
+    touchdownPoints: { type: PropTypes.Number, default: 6 },
+    manualSpotting: { type: PropTypes.Boolean, default: false }, // If true, Ref must interact to move ball
+    
+    // Debug
+    debug: { type: PropTypes.Boolean, default: true },
+  };
 
-    // Field Boundaries (set by FieldSetup_Gizmo)
-    private fieldBounds: any = null;
+  // Game State
+  private isGameActive: boolean = false;
+  private timeRemaining: number = 0;
+  private currentQuarter: number = 1;
+  
+  // Scoring
+  private scoreA: number = 0;
+  private scoreB: number = 0;
 
-    // Game State
-    private gameState: any = {
-        isGameActive: false,
-        isHalftime: false,
-        isGameOver: false,
-        currentQuarter: 1,
-        timeRemaining: 1200,
-        gameClock: 1200,
-        playClock: 25
-    };
+  // Downs & Distance
+  private currentDown: number = 1;
+  private possession: 'TeamA' | 'TeamB' = 'TeamA';
+  
+  // We use Vec3 for Horizon physics/positions
+  private ballPosition: Vec3 = Vec3.zero;
+  private lineOfScrimmage: Vec3 = Vec3.zero;
+  private lineToGain: Vec3 = Vec3.zero;
 
-    // Team Data
-    private teams: any = {
-        teamA: {
-            players: [],
-            score: 0,
-            timeouts: 3,
-            flags: []
-        },
-        teamB: {
-            players: [],
-            score: 0,
-            timeouts: 3,
-            flags: []
-        }
-    };
+  // Referee State
+  private waitingForSpot: boolean = false;
 
-    // Down and Distance Management
-    private downAndDistance: any = {
-        currentDown: 1,
-        yardsToGo: 20,
-        ballPosition: new Vector3(0, 0, 0),
-        lineOfScrimmage: new Vector3(0, 0, 0),
-        lineToGain: new Vector3(0, 0, 20),
-        possession: 'teamA'
-    };
+  start() {
+    // Initialize Timer
+    this.timeRemaining = this.props.gameDurationMinutes * 60;
+    
+    // Connect Update Loop for Timer
+    this.connectLocalBroadcastEvent(World.onUpdate, (data) => {
+      this.onUpdate(data.deltaTime);
+    });
 
-    // Referee System
-    private refereeSystem: any = {
-        designatedReferee: null,
-        waitingForSpot: false,
-        spotRequested: false,
-        lastSpotPosition: new Vector3(0, 0, 0)
-    };
+    this.updateUI();
+    this.log("Score Manager Initialized.");
+  }
 
-    // UI Elements
-    private scoreboardUI: UI | null = null;
-    private downMarkerUI: UI | null = null;
+  /**
+   * Main Game Loop
+   */
+  private onUpdate(deltaTime: number) {
+    if (this.isGameActive && this.timeRemaining > 0) {
+      this.timeRemaining -= deltaTime;
+      
+      // Handle Game End
+      if (this.timeRemaining <= 0) {
+        this.endGame();
+      }
 
-    public async start(): Promise<void> {
-        try {
-            console.log("[FlagFootball_ScoreManager] Starting...");
-            this.initializeGameState();
-            this.initializeTeams();
-            this.initializeDownAndDistance();
-            this.initializeRefereeSystem();
-            this.createUIElements();
-            console.log("[FlagFootball_ScoreManager] Initialized successfully");
-        } catch (error) {
-            console.error(`[FlagFootball_ScoreManager] Failed to initialize: ${error}`);
-        }
+      // Update UI every second (optimization to prevent text flicker)
+      if (Math.floor(this.timeRemaining) % 1 === 0) {
+        this.updateUI();
+      }
+    }
+  }
+
+  // ==========================================
+  // Public API (Called by other scripts)
+  // ==========================================
+
+  public startGame() {
+    this.isGameActive = true;
+    this.scoreA = 0;
+    this.scoreB = 0;
+    this.currentQuarter = 1;
+    this.timeRemaining = this.props.gameDurationMinutes * 60;
+    this.resetDowns('TeamA'); 
+    this.log("Game Started");
+    this.updateUI();
+  }
+
+  public stopGame() {
+    this.isGameActive = false;
+    this.updateUI();
+  }
+
+  public addScore(team: 'TeamA' | 'TeamB', points: number) {
+    if (team === 'TeamA') this.scoreA += points;
+    else this.scoreB += points;
+    
+    this.updateUI();
+    this.log(`${team} scored ${points} points!`);
+  }
+
+  /**
+   * Called by FlagFootball_Gizmo when a flag is pulled
+   */
+  public onPlayEnded(pullPosition: Vec3) {
+    this.log(`Play ended at: ${pullPosition}`);
+
+    if (this.props.manualSpotting) {
+      this.waitingForSpot = true;
+      // Logic for referee interaction would go here
+    } else {
+      this.spotBall(pullPosition);
+    }
+  }
+
+  /**
+   * Moves the line of scrimmage to the new spot
+   */
+  public spotBall(position: Vec3) {
+    this.ballPosition = position;
+    this.lineOfScrimmage = position;
+    this.waitingForSpot = false;
+
+    // Check for First Down
+    const distanceGained = this.checkDistanceGained(position);
+    
+    if (distanceGained) {
+      this.currentDown = 1;
+      this.calculateLineToGain();
+      this.log("First Down!");
+    } else {
+      this.currentDown++;
+      if (this.currentDown > 4) {
+        this.turnover();
+      }
     }
 
-    private initializeGameState(): void {
-        this.gameState = {
-            isGameActive: false,
-            isHalftime: false,
-            isGameOver: false,
-            currentQuarter: 1,
-            timeRemaining: this.gameDurationMinutes * 60,
-            gameClock: this.gameDurationMinutes * 60,
-            playClock: 25
-        };
-        console.log("[FlagFootball_ScoreManager] Game state initialized");
+    this.updateUI();
+  }
+
+  public turnover() {
+    this.possession = this.possession === 'TeamA' ? 'TeamB' : 'TeamA';
+    this.resetDowns(this.possession);
+    this.log("Turnover on downs!");
+  }
+
+  // ==========================================
+  // Internal Logic
+  // ==========================================
+
+  private resetDowns(team: 'TeamA' | 'TeamB') {
+    this.currentDown = 1;
+    this.possession = team;
+    this.calculateLineToGain();
+    this.updateUI();
+  }
+
+  private calculateLineToGain() {
+    // Simplified logic: Assuming Z+ is forward for Team A.
+    // In a full implementation, FieldSetup_Gizmo would provide direction.
+    const direction = this.possession === 'TeamA' ? 1 : -1;
+    
+    this.lineToGain = new Vec3(
+      this.lineOfScrimmage.x,
+      this.lineOfScrimmage.y,
+      this.lineOfScrimmage.z + (this.props.yardsForFirstDown * direction)
+    );
+  }
+
+  private checkDistanceGained(currentPos: Vec3): boolean {
+    if (this.possession === 'TeamA') {
+      return currentPos.z >= this.lineToGain.z;
+    } else {
+      return currentPos.z <= this.lineToGain.z;
+    }
+  }
+
+  private endGame() {
+    this.isGameActive = false;
+    this.timeRemaining = 0;
+    this.log("Game Over");
+    this.updateUI();
+  }
+
+  private updateUI() {
+    // Update Scoreboard Text Gizmo
+    if (this.props.scoreboardText) {
+      const textGizmo = this.props.scoreboardText.as(TextGizmo);
+      if (textGizmo) {
+        const timeStr = this.formatTime(this.timeRemaining);
+        textGizmo.text.set(
+          `HOME: ${this.scoreA} | GUEST: ${this.scoreB}\nQ${this.currentQuarter} - ${timeStr}`
+        );
+      }
     }
 
-    private initializeTeams(): void {
-        this.teams = {
-            teamA: {
-                players: [],
-                score: 0,
-                timeouts: 3,
-                flags: []
-            },
-            teamB: {
-                players: [],
-                score: 0,
-                timeouts: 3,
-                flags: []
-            }
-        };
-        console.log("[FlagFootball_ScoreManager] Team data initialized");
+    // Update Down Marker Text Gizmo
+    if (this.props.downMarkerText) {
+      const downGizmo = this.props.downMarkerText.as(TextGizmo);
+      if (downGizmo) {
+        downGizmo.text.set(
+          `Down: ${this.currentDown}\nPossession: ${this.possession}`
+        );
+      }
     }
+  }
 
-    private initializeDownAndDistance(): void {
-        if (this.fieldBounds) {
-            const center = this.fieldBounds.center;
-            this.downAndDistance = {
-                currentDown: 1,
-                yardsToGo: this.yardsForFirstDown,
-                ballPosition: center.clone(),
-                lineOfScrimmage: center.clone(),
-                lineToGain: new Vector3(center.x, center.y, center.z + this.yardsForFirstDown),
-                possession: 'teamA'
-            };
-        }
-        console.log("[FlagFootball_ScoreManager] Down and distance initialized");
-    }
+  private formatTime(seconds: number): string {
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  }
 
-    private initializeRefereeSystem(): void {
-        this.refereeSystem = {
-            designatedReferee: null,
-            waitingForSpot: false,
-            spotRequested: false,
-            lastSpotPosition: new Vector3(0, 0, 0)
-        };
-        console.log("[FlagFootball_ScoreManager] Referee system initialized");
-    }
-
-    private createUIElements(): void {
-        this.scoreboardUI = new UI();
-        this.scoreboardUI.position = new Vector3(0, 2, -5);
-        this.scoreboardUI.size = new Vector3(4, 2);
-        this.updateScoreboardUI();
-        
-        this.downMarkerUI = new UI();
-        this.downMarkerUI.position = new Vector3(0, 1.5, -3);
-        this.downMarkerUI.size = new Vector3(2, 1);
-        this.updateDownMarkerUI();
-        
-        console.log("[FlagFootball_ScoreManager] UI elements created");
-    }
-
-    public setFieldBoundaries(bounds: any): void {
-        this.fieldBounds = bounds;
-        console.log("[FlagFootball_ScoreManager] Field boundaries received");
-        this.initializeDownAndDistance();
-        this.updateDownMarkerUI();
-    }
-
-    public addPlayerToTeam(player: Player, team: string): boolean {
-        if (!this.teams[team]) {
-            console.error(`[FlagFootball_ScoreManager] Invalid team: ${team}`);
-            return false;
-        }
-
-        if (this.teams[team].players.length >= this.maxPlayersPerTeam) {
-            console.error(`[FlagFootball_ScoreManager] Team ${team} is full`);
-            return false;
-        }
-
-        if (this.isPlayerOnTeam(player)) {
-            console.error(`[FlagFootball_ScoreManager] Player already on a team`);
-            return false;
-        }
-
-        this.teams[team].players.push(player);
-        console.log(`[FlagFootball_ScoreManager] Player ${player.name} added to ${team}`);
-        return true;
-    }
-
-    public removePlayerFromTeam(player: Player): boolean {
-        let removed = false;
-        const indexA = this.teams.teamA.players.findIndex((p: any) => p.id === player.id);
-        if (indexA !== -1) {
-            this.teams.teamA.players.splice(indexA, 1);
-            removed = true;
-        }
-        const indexB = this.teams.teamB.players.findIndex((p: any) => p.id === player.id);
-        if (indexB !== -1) {
-            this.teams.teamB.players.splice(indexB, 1);
-            removed = true;
-        }
-        if (removed) {
-            console.log(`[FlagFootball_ScoreManager] Player ${player.name} removed from team`);
-        }
-        return removed;
-    }
-
-    public isPlayerOnTeam(player: Player): boolean {
-        return this.teams.teamA.players.some((p: any) => p.id === player.id) ||
-               this.teams.teamB.players.some((p: any) => p.id === player.id);
-    }
-
-    public setDesignatedReferee(player: Player): void {
-        this.refereeSystem.designatedReferee = player;
-        console.log(`[FlagFootball_ScoreManager] Player ${player.name} set as referee`);
-    }
-
-    public onFlagPull(position: Vector3, pullingPlayer: Player, pulledPlayer: Player): void {
-        console.log(`[FlagFootball_ScoreManager] Flag pulled by ${pullingPlayer.name} on ${pulledPlayer.name}`);
-
-        if (this.ManualSpotting && this.refereeSystem.designatedReferee) {
-            this.refereeSystem.waitingForSpot = true;
-            this.refereeSystem.spotRequested = true;
-            this.refereeSystem.lastSpotPosition = position;
-            console.log("[FlagFootball_ScoreManager] Waiting for referee to spot ball");
-        } else {
-            this.spotBall(position);
-        }
-    }
-
-    public spotBall(position: Vector3): void {
-        this.downAndDistance.ballPosition = position.clone();
-        this.downAndDistance.lineOfScrimmage = position.clone();
-
-        if (this.ManualSpotting) {
-            this.refereeSystem.waitingForSpot = false;
-            this.refereeSystem.spotRequested = false;
-            this.refereeSystem.lastSpotPosition = position.clone();
-        }
-
-        this.updateLineToGain();
-        this.advanceDown();
-        
-        console.log(`[FlagFootball_ScoreManager] Ball spotted at ${position.toString()}`);
-        this.updateDownMarkerUI();
-    }
-
-    private updateLineToGain(): void {
-        const possession = this.downAndDistance.possession;
-        const lineOfScrimmage = this.downAndDistance.lineOfScrimmage;
-        
-        if (possession === 'teamA') {
-            this.downAndDistance.lineToGain = new Vector3(
-                lineOfScrimmage.x,
-                lineOfScrimmage.y,
-                lineOfScrimmage.z + this.yardsForFirstDown
-            );
-        } else {
-            this.downAndDistance.lineToGain = new Vector3(
-                lineOfScrimmage.x,
-                lineOfScrimmage.y,
-                lineOfScrimmage.z - this.yardsForFirstDown
-            );
-        }
-    }
-
-    private advanceDown(): void {
-        this.downAndDistance.currentDown++;
-        
-        if (this.downAndDistance.currentDown > 4) {
-            this.turnover();
-        }
-    }
-
-    private turnover(): void {
-        this.downAndDistance.possession = this.downAndDistance.possession === 'teamA' ? 'teamB' : 'teamA';
-        this.downAndDistance.currentDown = 1;
-        this.downAndDistance.yardsToGo = this.yardsForFirstDown;
-        this.updateLineToGain();
-        console.log(`[FlagFootball_ScoreManager] Turnover! ${this.downAndDistance.possession} now has possession`);
-    }
-
-    public addScore(team: string, points: number, scoringType: string): void {
-        if (!this.teams[team]) {
-            console.error(`[FlagFootball_ScoreManager] Invalid team: ${team}`);
-            return;
-        }
-
-        this.teams[team].score += points;
-        console.log(`[FlagFootball_ScoreManager] ${team} scored ${points} points (${scoringType})`);
-        this.updateScoreboardUI();
-    }
-
-    public onTouchdown(team: string): void {
-        this.addScore(team, this.touchdownPoints, "Touchdown");
-        this.setupExtraPointAttempt(team);
-    }
-
-    private setupExtraPointAttempt(team: string): void {
-        console.log(`[FlagFootball_ScoreManager] Extra point attempt setup for ${team}`);
-    }
-
-    private updateScoreboardUI(): void {
-        if (!this.scoreboardUI) return;
-
-        const scoreText = `Team A: ${this.teams.teamA.score} | Team B: ${this.teams.teamB.score}\n` +
-                         `Quarter: ${this.gameState.currentQuarter} | Time: ${this.formatTime(this.gameState.timeRemaining)}`;
-        
-        this.scoreboardUI.text = scoreText;
-    }
-
-    private updateDownMarkerUI(): void {
-        if (!this.downMarkerUI) return;
-
-        const downText = `${this.downAndDistance.currentDown} & ${this.downAndDistance.yardsToGo}\n` +
-                        `Possession: ${this.downAndDistance.possession}`;
-        
-        this.downMarkerUI.text = downText;
-    }
-
-    private formatTime(seconds: number): string {
-        const minutes = Math.floor(seconds / 60);
-        const remainingSeconds = seconds % 60;
-        return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
-    }
-
-    public startGame(): void {
-        this.gameState.isGameActive = true;
-        this.gameState.isGameOver = false;
-        this.gameState.timeRemaining = this.gameDurationMinutes * 60;
-        console.log("[FlagFootball_ScoreManager] Game started!");
-    }
-
-    public stopGame(): void {
-        this.gameState.isGameActive = false;
-        this.gameState.isGameOver = true;
-        console.log("[FlagFootball_ScoreManager] Game stopped!");
-    }
-
-    public getGameState(): any {
-        return {
-            gameState: this.gameState,
-            teams: this.teams,
-            downAndDistance: this.downAndDistance,
-            refereeSystem: this.refereeSystem
-        };
-    }
-
-    public update(deltaTime: number): void {
-        if (this.gameState.isGameActive && !this.gameState.isGameOver) {
-            this.gameState.timeRemaining -= deltaTime;
-            
-            if (this.gameState.timeRemaining <= 0) {
-                this.gameState.timeRemaining = 0;
-                this.stopGame();
-            }
-            
-            this.updateScoreboardUI();
-        }
-    }
-
-    public onDestroy(): void {
-        if (this.scoreboardUI) {
-            this.scoreboardUI.destroy();
-        }
-        if (this.downMarkerUI) {
-            this.downMarkerUI.destroy();
-        }
-        console.log("[FlagFootball_ScoreManager] Destroyed");
-    }
+  private log(msg: string) {
+    if (this.props.debug) console.log(`[ScoreManager] ${msg}`);
+  }
 }
+
+Component.register(FlagFootball_ScoreManager);

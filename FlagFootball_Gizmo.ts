@@ -1,72 +1,99 @@
 import { Component, PropTypes, Entity, Player, Vec3, Color } from 'horizon/core';
 
 /**
- * FlagFootball_Gizmo
- * Purpose: Manages attaching flags to players hips using a Spawner Gizmo.
+ * FlagFootball_Gizmo - Simplified Version
+ * Purpose: Basic flag attachment to players
  */
-export class FlagFootball_Gizmo extends Component<typeof FlagFootball_Gizmo> {
+export class FlagFootball_Gizmo extends Component {
   static propsDefinition = {
-    // Drag a Spawner Gizmo (containing your flag template) here
     flagSpawner: { type: PropTypes.Entity },
-    
     teamAColor: { type: PropTypes.Color, default: new Color(1, 0, 0) },
     teamBColor: { type: PropTypes.Color, default: new Color(0, 0, 1) },
-    
-    debug: { type: PropTypes.Boolean, default: true },
+    debug: { type: PropTypes.Boolean, default: true }
   };
 
-  private playerFlags = new Map<number, { left: Entity, right: Entity, team: string }>();
+  private playerFlags = new Map();
 
   start() {
-    if (!this.props.flagSpawner) {
-      console.error("FlagFootball_Gizmo: No Flag Spawner assigned!");
+    try {
+      if (!this.props.flagSpawner) {
+        console.error("FlagFootball_Gizmo: No Flag Spawner assigned!");
+      } else {
+        console.log("FlagFootball_Gizmo initialized");
+      }
+    } catch (error) {
+      console.error("FlagFootball_Gizmo: Error in start:", error);
     }
   }
 
-  // ==========================================
-  // Public API
-  // ==========================================
-
   public attachFlagsToPlayer(player: Player, team: string) {
-    this.removeFlagsFromPlayer(player);
+    try {
+      this.removeFlagsFromPlayer(player);
 
-    if (!this.props.flagSpawner) return;
+      if (!this.props.flagSpawner) return;
 
-    // TS Fix: Cast to 'any' to bypass missing type definitions
-    const spawner = this.props.flagSpawner as any;
+      const spawner = this.props.flagSpawner as any;
 
-    if (typeof spawner.spawn !== 'function') {
-      console.error("FlagFootball_Gizmo: Assigned entity is not a Spawner!");
-      return;
-    }
+      if (!spawner || typeof spawner.spawn !== 'function') {
+        console.error("FlagFootball_Gizmo: Spawner not valid!");
+        return;
+      }
 
-    // Spawn Flags
-    const leftFlag = spawner.spawn();
-    const rightFlag = spawner.spawn();
+      const leftFlag = spawner.spawn();
+      const rightFlag = spawner.spawn();
 
-    if (leftFlag && rightFlag) {
-      // Parent to player
-      (leftFlag as any).setParent(player);
-      (rightFlag as any).setParent(player);
-      
-      // Store references
-      this.playerFlags.set(player.id, { left: leftFlag, right: rightFlag, team: team });
-      
-      if (this.props.debug) console.log(`Flags spawned for ${player.name}`);
+      if (leftFlag && rightFlag) {
+        const teamColor = team === 'TeamA' ? this.props.teamAColor : this.props.teamBColor;
+        
+        if (leftFlag.setMaterialColor) {
+          leftFlag.setMaterialColor(teamColor);
+        }
+        if (rightFlag.setMaterialColor) {
+          rightFlag.setMaterialColor(teamColor);
+        }
+        
+        if (leftFlag.setParent) {
+          leftFlag.setParent(player);
+        }
+        if (rightFlag.setParent) {
+          rightFlag.setParent(player);
+        }
+        
+        this.playerFlags.set(player.id, { left: leftFlag, right: rightFlag, team: team });
+        
+        if (this.props.debug) {
+          console.log(`Flags spawned for ${player.name} on team ${team}`);
+        }
+      }
+    } catch (error) {
+      console.error("FlagFootball_Gizmo: Error attaching flags:", error);
     }
   }
 
   public removeFlagsFromPlayer(player: Player) {
-    if (this.playerFlags.has(player.id)) {
-      const data = this.playerFlags.get(player.id)!;
-      
-      // Destroy flags
-      if (data.left) (data.left as any).destroy();
-      if (data.right) (data.right as any).destroy();
-      
-      this.playerFlags.delete(player.id);
+    try {
+      if (this.playerFlags.has(player.id)) {
+        const data = this.playerFlags.get(player.id);
+        
+        if (data) {
+          if (data.left && data.left.destroy) {
+            data.left.destroy();
+          }
+          if (data.right && data.right.destroy) {
+            data.right.destroy();
+          }
+        }
+        
+        this.playerFlags.delete(player.id);
+        
+        if (this.props.debug) {
+          console.log(`Flags removed from ${player.name}`);
+        }
+      }
+    } catch (error) {
+      console.error("FlagFootball_Gizmo: Error removing flags:", error);
     }
   }
 }
 
-Component.register(FlagFootball_Gizmo);``
+Component.register(FlagFootball_Gizmo);
